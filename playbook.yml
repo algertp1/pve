@@ -1,0 +1,215 @@
+---
+# Veeam Backup Repository - RAID6 + XFS Setup
+# Target: Ubuntu 24.04 LTS on Proxmox 9.1
+# Disks: 6x HDD as mdadm RAID6 (4+2 parity)
+#
+# Usage:
+#   ansible-playbook -i inventory.ini playbook.yml
+#
+# Prerequisites:
+#   - Ubuntu 24.04 VM created and accessible via SSH
+#   - 6 HDD disks passed through to the VM (sdb-sdg or similar)
+#   - SSH key-based auth configured
+#
+# IMPORTANT: Review the 'vars' section and confirm disk devices
+# match your environment before running. This playbook will
+# destroy all data on the listed disks.
+
+- name: Configure Veeam Backup Repository - RAID6 + XFS
+  hosts: veeam_repo
+  become: true
+  vars:
+    # -- Disk Configuration --
+    # List all 6 HDD devices for the RAID array.
+    # Verify with 'lsblk' on the target VM before running.
+    raid_disks:
+      - /dev/sdb
+      - /dev/sdc
+      - /dev/sdd
+      - /dev/sde
+      - /dev/sdf
+      - /dev/sdg
+
+    # -- RAID Settings --
+    raid_device: /dev/md0
+    raid_level: 6
+    raid_chunk_size: 256  # KB - good balance for large sequential backup writes
+
+    # -- Filesystem Settings --
+    mount_point: /mnt/veeam-repo
+    xfs_mount_options: "noatime,nodiratime,logbufs=8,logbsize=256k,allocsize=1g"
+
+  tasks:
+    # -------------------------------------------------------
+    # 1. Install required packages
+    # -------------------------------------------------------
+    - name: Install mdadm and XFS utilities
+      apt:
+        name:
+          - mdadm
+          - xfsprogs
+        state: present
+        update_cache: true
+
+    # -------------------------------------------------------
+    # 2. Validate disks exist
+    # -------------------------------------------------------
+    - name: Check that all RAID disks exist
+      stat:
+        path: "{{ item }}"
+      register: disk_check
+      loop: "{{ raid_disks }}"
+
+    - name: Fail if any disk is missing
+      fail:
+        msg: "Disk {{ item.item }} does not exist on this system"
+      when: not item.stat.exists
+      loop: "{{ disk_check.results }}"
+
+    # -------------------------------------------------------
+    # 3. Check if RAID array already exists
+    # -------------------------------------------------------
+    - name: Check if RAID device already exists
+      stat:
+        path: "{{ raid_device }}"
+      register: raid_exists
+
+    # -------------------------------------------------------
+    # 4. Wipe disks and create RAID array
+    # -------------------------------------------------------
+    - name: Wipe existing partition tables and superblocks
+      command: "wipefs -a {{ item }}"
+      loop: "{{ raid_disks }}"
+      when: not raid_exists.stat.exists
+
+    - name: Zero superblocks on all disks
+      command: "mdadm --zero-superblock {{ item }}"
+      loop: "{{ raid_disks }}"
+      when: not raid_exists.stat.exists
+      failed_when: false  # Ignore errors if no superblock present
+
+    - name: Create RAID6 array
+      command: >
+        mdadm --create {{ raid_device }}
+        --level={{ raid_level }}
+        --raid-devices={{ raid_disks | length }}
+        --chunk={{ raid_chunk_size }}
+        --metadata=1.2
+        {{ raid_disks | join(' ') }}
+      args:
+        creates: "{{ raid_device }}"
+
+    # -------------------------------------------------------
+    # 5. Wait for RAID sync to start
+    # -------------------------------------------------------
+    - name: Wait for RAID device to become available
+      wait_for:
+        path: "{{ raid_device }}"
+        timeout: 30
+
+    - name: Get RAID sync status
+      command: cat /proc/mdstat
+      register: mdstat
+      changed_when: false
+
+    - name: Display RAID sync status
+      debug:
+        msg: |
+          RAID array created. Initial sync in progress.
+          NOTE: Full sync of spinning disks can take many hours.
+          XFS formatting and mount will proceed without waiting.
+          --- /proc/mdstat ---
+          {{ mdstat.stdout }}
+
+    # -------------------------------------------------------
+    # 6. Save RAID configuration
+    # -------------------------------------------------------
+    - name: Save mdadm configuration
+      shell: mdadm --detail --scan >> /etc/mdadm/mdadm.conf
+      args:
+        creates: /etc/mdadm/mdadm.conf.bak
+
+    - name: Backup mdadm.conf
+      copy:
+        src: /etc/mdadm/mdadm.conf
+        dest: /etc/mdadm/mdadm.conf.bak
+        remote_src: true
+
+    - name: Update initramfs to include RAID config
+      command: update-initramfs -u
+
+    # -------------------------------------------------------
+    # 7. Create XFS filesystem
+    # -------------------------------------------------------
+    - name: Check if XFS filesystem exists on RAID device
+      command: "blkid -o value -s TYPE {{ raid_device }}"
+      register: fs_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create XFS filesystem on RAID array
+      command: >
+        mkfs.xfs
+        -f
+        -L veeam-repo
+        -d su={{ raid_chunk_size }}k,sw=4
+        {{ raid_device }}
+      when: fs_check.stdout != "xfs"
+      # su = stripe unit (chunk size)
+      # sw = stripe width (number of data disks in RAID6 = total - 2 parity = 4)
+
+    # -------------------------------------------------------
+    # 8. Mount filesystem
+    # -------------------------------------------------------
+    - name: Create mount point
+      file:
+        path: "{{ mount_point }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Mount XFS filesystem and add to fstab
+      mount:
+        path: "{{ mount_point }}"
+        src: "{{ raid_device }}"
+        fstype: xfs
+        opts: "{{ xfs_mount_options }}"
+        state: mounted
+
+    # -------------------------------------------------------
+    # 9. Verify
+    # -------------------------------------------------------
+    - name: Verify mount
+      command: df -h {{ mount_point }}
+      register: df_output
+      changed_when: false
+
+    - name: Verify RAID detail
+      command: mdadm --detail {{ raid_device }}
+      register: raid_detail
+      changed_when: false
+
+    - name: Display summary
+      debug:
+        msg: |
+          ============================================
+          Veeam Backup Repository Setup Complete
+          ============================================
+          Mount point: {{ mount_point }}
+          Filesystem:  XFS on RAID6
+          Disks:       {{ raid_disks | length }}x HDD
+          Usable:      {{ raid_disks | length - 2 }} disks worth of capacity
+          Mount opts:  {{ xfs_mount_options }}
+          
+          --- df -h ---
+          {{ df_output.stdout }}
+          
+          --- RAID Detail ---
+          {{ raid_detail.stdout }}
+          
+          NEXT STEPS:
+          1. Add this server as a Managed Linux Server in Veeam
+          2. Assign {{ mount_point }} as the backup repository path
+          3. Veeam will push its transport agent automatically
+          ============================================
