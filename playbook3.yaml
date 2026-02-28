@@ -1,0 +1,74 @@
+---
+- name: Configure Veeam Hardened Repository (RAID 6 + XFS)
+  hosts: veeam_repo_server
+  become: yes
+  vars:
+    # Explicitly targeting sdb through sdg as requested
+    repo_disks:
+      - /dev/sdb
+      - /dev/sdc
+      - /dev/sdd
+      - /dev/sde
+      - /dev/sdf
+      - /dev/sdg
+    raid_device: "/dev/md0"
+    mount_point: "/mnt/veeamrepo"
+    veeam_user: "veeamrepo"
+
+  tasks:
+    - name: Install RAID and XFS utilities
+      apt:
+        name:
+          - mdadm
+          - xfsprogs
+        state: present
+        update_cache: yes
+
+    - name: Create RAID 6 array with 6 disks
+      mdadm:
+        name: "{{ raid_device }}"
+        devices: "{{ repo_disks }}"
+        level: 6
+        state: present
+        # RAID 6 requires at least 4 disks; we are using 6.
+
+    - name: Ensure mdadm.conf is updated for persistence
+      shell: "/usr/share/mdadm/mkconf > /etc/mdadm/mdadm.conf"
+      args:
+        creates: /etc/mdadm/mdadm.conf
+
+    - name: Update initramfs to recognize RAID on boot (Ubuntu 25.10)
+      command: update-initramfs -u
+
+    - name: Format the RAID array with XFS Reflink (Fast Clone)
+      # We use 4k blocks to match modern HDD/SSD physical sectors
+      filesystem:
+        fstype: xfs
+        dev: "{{ raid_device }}"
+        opts: "-m reflink=1,crc=1 -b size=4096"
+        force: no
+
+    - name: Create the repository mount point
+      file:
+        path: "{{ mount_point }}"
+        state: directory
+        owner: "{{ veeam_user }}"
+        group: "{{ veeam_user }}"
+        mode: '0700'
+
+    - name: Mount the volume and add to fstab
+      mount:
+        path: "{{ mount_point }}"
+        src: "{{ raid_device }}"
+        fstype: xfs
+        opts: defaults,noatime
+        state: mounted
+      # 'noatime' is a performance tweak for backup repos to reduce metadata writes
+
+    - name: Final permission enforcement on the mount point
+      file:
+        path: "{{ mount_point }}"
+        state: directory
+        owner: "{{ veeam_user }}"
+        group: "{{ veeam_user }}"
+        mode: '0700'
