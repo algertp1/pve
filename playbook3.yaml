@@ -29,13 +29,11 @@
         shell: /bin/bash
         create_home: yes
 
-    - name: Create RAID 6 array
-      community.general.mdadm:
-        name: "{{ raid_device }}"
-        devices: "{{ repo_disks }}"
-        level: 6
-        state: present
-        force: yes
+    - name: Create RAID 6 array (Manual Command)
+      # This command only runs if /dev/md0 doesn't already exist
+      shell: "mdadm --create --run --verbose {{ raid_device }} --level=6 --raid-devices=6 {{ repo_disks | join(' ') }}"
+      args:
+        creates: "{{ raid_device }}"
 
     - name: Check if md0 is already in mdadm.conf
       shell: "grep -q '{{ raid_device }}' /etc/mdadm/mdadm.conf"
