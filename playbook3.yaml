@@ -30,11 +30,12 @@
         create_home: yes
 
     - name: Create RAID 6 array
-      mdadm:
+      community.general.mdadm:
         name: "{{ raid_device }}"
         devices: "{{ repo_disks }}"
         level: 6
         state: present
+        force: yes
 
     - name: Check if md0 is already in mdadm.conf
       shell: "grep -q '{{ raid_device }}' /etc/mdadm/mdadm.conf"
