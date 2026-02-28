@@ -1,0 +1,82 @@
+---
+- name: Setup Optimized Veeam Hardened Repository (Ubuntu 25.10 / EPYC Zen 4)
+  hosts: backup_servers
+  become: true
+  vars:
+    # WD HC550 16TB Drives (assumed /dev/sdb through /dev/sdg)
+    raid_devices: "/dev/sdb /dev/sdc /dev/sdd /dev/sde /dev/sdf /dev/sdg"
+    raid_interface: "/dev/md0"
+    veeam_user: "veeam_repo"
+    mount_point: "/mnt/veeam_hardened"
+    
+    # Calculation for RAID 6 (6 drives total, 4 data, 2 parity)
+    # Chunk Size: 128KB
+    # sunit (Stripe Unit): 128KB / 512B = 256
+    # swidth (Stripe Width): 256 * 4 (data drives) = 1024
+    sunit_val: 256
+    swidth_val: 1024
+
+  tasks:
+    - name: Install required storage and ACL utilities
+      apt:
+        name: [mdadm, xfsprogs, acl]
+        state: present
+        update_cache: yes
+
+    - name: Create Software RAID 6 with 128KB Chunk Alignment
+      shell: |
+        if [ ! -b {{ raid_interface }} ]; then
+          mdadm --create --verbose {{ raid_interface }} \
+          --level=6 --raid-devices=6 --chunk=128 {{ raid_devices }} --run
+        fi
+      args:
+        creates: "{{ raid_interface }}"
+
+    - name: Create Optimized XFS Filesystem (Reflink + Stripe Aligned)
+      # -b size=4096: Matches HC550 physical sector size
+      # -m reflink=1: Required for Veeam Fast Clone
+      # -d sunit/swidth: Aligns XFS allocator to RAID stripes
+      command: >
+        mkfs.xfs -f -m reflink=1,crc=1 
+        -b size=4096 
+        -d sunit={{ sunit_val }},swidth={{ swidth_val }} 
+        {{ raid_interface }}
+      args:
+        creates: "{{ raid_interface }}" # Simple check; shell might be safer if re-running
+
+    - name: Register RAID UUID for fstab
+      command: blkid -s UUID -o value {{ raid_interface }}
+      register: raid_uuid
+      changed_when: false
+
+    - name: Mount Repository with noatime for performance
+      mount:
+        path: "{{ mount_point }}"
+        src: "UUID={{ raid_uuid.stdout }}"
+        fstype: xfs
+        opts: defaults,noatime
+        state: mounted
+
+    - name: Create Veeam Service User (Temporary Sudo)
+      user:
+        name: "{{ veeam_user }}"
+        shell: /bin/bash
+        groups: sudo
+
+    - name: Set Repository Permissions
+      file:
+        path: "{{ mount_point }}"
+        owner: "{{ veeam_user }}"
+        group: "{{ veeam_user }}"
+        mode: '0700'
+
+    - name: Persist RAID configuration
+      shell: |
+        mdadm --detail --scan | tee /etc/mdadm/mdadm.conf
+        update-initramfs -u
+      changed_when: false
+
+    - name: Optimization - Set Read-Ahead for RAID
+      # Higher read-ahead (16MB) helps with sequential backup verification
+      shell: blockdev --setra 32768 {{ raid_interface }}
+      changed_when: false
