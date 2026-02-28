@@ -1,6 +1,6 @@
 ---
 - name: Configure Veeam Hardened Repository (RAID 6 + XFS)
-  hosts: veeam_repo_server
+  hosts: xfsrepo1
   become: yes
   vars:
     # Explicitly targeting sdb through sdg as requested
