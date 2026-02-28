@@ -36,12 +36,15 @@
         level: 6
         state: present
 
-    - name: Ensure mdadm.conf is updated for persistence
-      # Use a shell redirect but force it so we capture the array info
-      shell: "mdadm --detail --scan >> /etc/mdadm/mdadm.conf"
-      register: mdadm_config
-      changed_when: "'md0' not in mdadm_config.stdout"
-      # This ensures we don't append the same line every time you run it
+    - name: Check if md0 is already in mdadm.conf
+      shell: "grep -q '{{ raid_device }}' /etc/mdadm/mdadm.conf"
+      register: mdadm_check
+      failed_when: false
+      changed_when: false
+
+    - name: Append md0 to existing mdadm.conf if missing
+      shell: "mdadm --detail --scan --verbose {{ raid_device }} >> /etc/mdadm/mdadm.conf"
+      when: mdadm_check.rc != 0
 
     - name: Update initramfs (Ubuntu 25.10)
       command: update-initramfs -u
