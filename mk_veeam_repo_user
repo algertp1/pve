@@ -1,0 +1,32 @@
+#!/bin/bash
+
+# --- Configuration ---
+VEEAM_USER="veeamrepo"
+VEEAM_DIR="/mnt/veeamrepo"
+
+echo "=== Starting Veeam Hardened Repository User Setup ==="
+
+# 1. Create the dedicated Veeam group and user
+echo "Creating user and group: $VEEAM_USER..."
+groupadd $VEEAM_USER
+useradd -m -g $VEEAM_USER -s /bin/bash $VEEAM_USER
+
+# Prompt to securely set the password for this new user
+echo "Please set a strong password for the $VEEAM_USER account:"
+passwd $VEEAM_USER
+
+# 2. Grant temporary sudo privileges for initial Veeam deployment
+echo "Adding $VEEAM_USER to the sudo group..."
+usermod -aG sudo $VEEAM_USER
+
+# 3. Create the mount point and set strict permissions
+echo "Configuring permissions on $VEEAM_DIR..."
+mkdir -p $VEEAM_DIR
+chown -R $VEEAM_USER:$VEEAM_USER $VEEAM_DIR
+
+# Veeam requires 700 permissions to ensure only this user can access the backups
+chmod 700 $VEEAM_DIR
+
+echo "=== Setup Complete ==="
+echo "The user '$VEEAM_USER' is ready. In the Veeam v13 console, use this account"
+echo "and select 'Single-use credentials for hardened repository' when adding the server."
