@@ -1,0 +1,38 @@
+#!/bin/bash
+set -e
+
+# --- Configuration ---
+VEEAM_USER="veeamrepo"
+VEEAM_DIR="/mnt/veeam-repo"  # Must match your XFS mount point
+
+echo "=== Starting Veeam Repository User Setup ==="
+
+# 1. Create user (skip if exists)
+if id "$VEEAM_USER" &>/dev/null; then
+    echo "User $VEEAM_USER already exists, skipping creation"
+else
+    echo "Creating user: $VEEAM_USER..."
+    groupadd "$VEEAM_USER"
+    useradd -m -g "$VEEAM_USER" -s /bin/bash "$VEEAM_USER"
+    echo "Set password for $VEEAM_USER:"
+    passwd "$VEEAM_USER"
+fi
+
+# 2. Grant sudo for Veeam operations
+echo "Adding $VEEAM_USER to sudo group..."
+usermod -aG sudo "$VEEAM_USER"
+
+# 3. Set permissions on repo directory (must already be mounted)
+if mountpoint -q "$VEEAM_DIR"; then
+    echo "Setting ownership on $VEEAM_DIR..."
+    chown "$VEEAM_USER":"$VEEAM_USER" "$VEEAM_DIR"
+    chmod 700 "$VEEAM_DIR"
+else
+    echo "ERROR: $VEEAM_DIR is not a mount point. Is the RAID mounted?"
+    exit 1
+fi
+
+echo "=== Setup Complete ==="
+echo "Add this server in Veeam console as a Linux Managed Server"
+echo "using the '$VEEAM_USER' account with persistent credentials."
+echo "Repository path: $VEEAM_DIR"
